@@ -1,4 +1,10 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Albion Transport / Profit Tools
+
+Albion Online market-route, crafting, and refining tools built with Next.js, TypeScript, PostgreSQL, and Prisma. See [local setup and rolling coverage](docs/LOCAL-RUNNING.md) for database setup, Windows startup, refresh behavior, and verification commands.
+
+Public prices are community observations, not guaranteed executable orders. Private prices come from authenticated manual entry or CSV imports.
+
+The framework reference below is retained from the original Next.js scaffold.
 
 ## Getting Started
 

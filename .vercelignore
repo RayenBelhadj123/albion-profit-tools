@@ -1,0 +1,9 @@
+# Local source assets and workspace metadata that are not used by the app.
+.env
+.env.*
+Albion icons/
+*.xlsx
+.agents/
+.claude/
+.codex-tmp/
+.windsurf/

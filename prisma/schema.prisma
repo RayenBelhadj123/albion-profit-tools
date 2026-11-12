@@ -1,0 +1,577 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum AlbionServer {
+  EUROPE
+  AMERICAS
+  ASIA
+}
+
+enum AlbionCity {
+  BRIDGEWATCH
+  BLACK_MARKET
+  CAERLEON
+  FORT_STERLING
+  LYMHURST
+  MARTLOCK
+  THETFORD
+}
+
+enum MarketOrderType {
+  BUY
+  SELL
+}
+
+enum MarketObservationSource {
+  LIVE_PUBLIC
+  LAST_KNOWN_PUBLIC
+  HISTORICAL_PUBLIC
+  PRIVATE_MANUAL
+  PRIVATE_IMPORT
+  PRIVATE_API
+  CALCULATED
+}
+
+enum MarketObservationConfidence {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum PrivateObservationSource {
+  MANUAL
+  CSV_IMPORT
+  PRIVATE_API
+}
+
+enum SelectedPriceSource {
+  PUBLIC
+  PRIVATE_MANUAL
+  PRIVATE_IMPORT
+  CALCULATED
+}
+
+enum TransportStrategy {
+  INSTANT_SELL
+  SELL_ORDER
+}
+
+enum TransportPlanStatus {
+  DRAFT
+  SAVED
+  COMPLETED
+  CANCELLED
+}
+
+enum CraftPlanStatus {
+  DRAFT
+  SAVED
+  COMPLETED
+  CANCELLED
+}
+
+enum CraftLocationType {
+  CITY
+  HIDEOUT
+}
+
+model User {
+  id                    String                     @id @default(uuid())
+  email                 String?                    @unique
+  displayName           String?
+  passwordHash          String?
+  createdAt             DateTime                   @default(now())
+  updatedAt             DateTime                   @updatedAt
+  privateObservations   PrivateMarketObservation[]
+  marketObservations    MarketPriceObservation[]
+  transportProfiles     TransportProfile[]
+  transportPlans        TransportPlan[]
+  completedTrips        CompletedTrip[]
+  craftProfiles         CraftProfile[]
+  craftPlans            CraftPlan[]
+  completedCraftBatches CompletedCraftBatch[]
+  settings              UserSetting?
+  sessions              UserSession[]
+}
+
+model UserSession {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Item {
+  id                   String                     @id
+  name                 String?
+  tier                 Int?
+  enchantment          Int                        @default(0)
+  weightGrams          Int?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  priceCaches          MarketPriceCache[]
+  marketObservations   MarketPriceObservation[]
+  privateObservations  PrivateMarketObservation[]
+  transportPlanItems   TransportPlanItem[]
+  completedTripItems   CompletedTripItem[]
+  craftedByRecipes     CraftRecipe[]              @relation("CraftRecipeOutput")
+  ingredientInRecipes  CraftRecipeIngredient[]    @relation("CraftRecipeIngredient")
+  craftPlanItems       CraftPlanItem[]
+  craftPlanIngredients CraftPlanIngredient[]
+  completedCraftItems  CompletedCraftBatchItem[]
+}
+
+model MarketPriceCache {
+  id                   String       @id @default(uuid())
+  server               AlbionServer
+  itemId               String
+  city                 AlbionCity
+  quality              Int
+  sellPriceMin         BigInt?
+  sellPriceMinDate     DateTime?
+  sellPriceMinQuantity Int?
+  buyPriceMax          BigInt?
+  buyPriceMaxDate      DateTime?
+  buyPriceMaxQuantity  Int?
+  fetchedAt            DateTime     @default(now())
+  item                 Item         @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([server, itemId, city, quality])
+  @@index([server, city, quality])
+  @@index([fetchedAt])
+}
+
+/// Persisted public scan results. Full catalog scans can exceed browser
+/// storage quotas, so refresh restoration must not depend on localStorage.
+model BlackMarketScanSnapshot {
+  id        String   @id
+  result    Json
+  scannedAt DateTime
+  cachedAt  DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([cachedAt])
+}
+
+/// Append-only, source-aware market facts used by every calculator. Public
+/// rows have no userId; private rows belong to exactly one user. A null price
+/// records missing coverage and is intentionally different from zero silver.
+model MarketPriceObservation {
+  id                String                      @id @default(uuid())
+  userId            String?
+  server            AlbionServer
+  itemId            String
+  city              AlbionCity
+  quality           Int
+  orderType         MarketOrderType
+  price             BigInt?
+  availableQuantity Int?
+  observedAt        DateTime?
+  collectedAt       DateTime                    @default(now())
+  expiresAt         DateTime?
+  source            MarketObservationSource
+  confidence        MarketObservationConfidence
+  sourceReference   String?
+  metadataJson      Json?
+  user              User?                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  item              Item                        @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([server, itemId, city, quality, orderType, observedAt])
+  @@index([userId, server, itemId, city, quality, orderType, observedAt])
+  @@index([source, collectedAt])
+  @@index([expiresAt])
+}
+
+model PrivateMarketObservation {
+  id                String                   @id @default(uuid())
+  userId            String
+  server            AlbionServer
+  itemId            String
+  city              AlbionCity
+  quality           Int
+  orderType         MarketOrderType
+  price             BigInt
+  availableQuantity Int?
+  observedAt        DateTime
+  expiresAt         DateTime?
+  source            PrivateObservationSource @default(MANUAL)
+  preferredOverride Boolean                  @default(false)
+  note              String?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  user              User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  item              Item                     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([userId, server, itemId, city, quality, orderType])
+  @@index([observedAt])
+  @@index([expiresAt])
+}
+
+model Route {
+  id              String          @id @default(uuid())
+  server          AlbionServer
+  sourceCity      AlbionCity
+  destinationCity AlbionCity
+  durationMinutes Int?
+  riskLevel       Int?
+  notes           String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  plans           TransportPlan[]
+  trips           CompletedTrip[]
+
+  @@unique([server, sourceCity, destinationCity])
+}
+
+model TransportProfile {
+  id                    String          @id @default(uuid())
+  userId                String
+  name                  String
+  defaultServer         AlbionServer    @default(EUROPE)
+  availableSilver       BigInt?
+  carryingCapacityGrams Int?
+  taxRateBasisPoints    Int             @default(650)
+  setupFeeSilver        BigInt          @default(0)
+  maxDataAgeMinutes     Int             @default(60)
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+  user                  User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plans                 TransportPlan[]
+
+  @@index([userId])
+}
+
+model TransportPlan {
+  id                    String              @id @default(uuid())
+  userId                String
+  routeId               String?
+  profileId             String?
+  server                AlbionServer
+  sourceCity            AlbionCity
+  destinationCity       AlbionCity
+  status                TransportPlanStatus @default(DRAFT)
+  strategy              TransportStrategy   @default(INSTANT_SELL)
+  availableSilver       BigInt
+  carryingCapacityGrams Int
+  expectedInvestment    BigInt              @default(0)
+  expectedGrossRevenue  BigInt              @default(0)
+  expectedTaxes         BigInt              @default(0)
+  expectedSetupFees     BigInt              @default(0)
+  expectedNetProfit     BigInt              @default(0)
+  notes                 String?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  user                  User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  route                 Route?              @relation(fields: [routeId], references: [id], onDelete: SetNull)
+  profile               TransportProfile?   @relation(fields: [profileId], references: [id], onDelete: SetNull)
+  items                 TransportPlanItem[]
+  completedTrip         CompletedTrip?
+
+  @@index([userId, createdAt])
+  @@index([server, sourceCity, destinationCity])
+}
+
+model TransportPlanItem {
+  id                   String              @id @default(uuid())
+  planId               String
+  itemId               String
+  quality              Int
+  quantity             Int
+  purchasePrice        BigInt
+  expectedSalePrice    BigInt
+  purchasePriceSource  SelectedPriceSource
+  salePriceSource      SelectedPriceSource
+  purchaseObservedAt   DateTime?
+  saleObservedAt       DateTime?
+  availableQuantity    Int?
+  itemWeightGrams      Int?
+  totalWeightGrams     Int?
+  expectedInvestment   BigInt
+  expectedGrossRevenue BigInt
+  expectedTaxes        BigInt
+  expectedSetupFees    BigInt              @default(0)
+  expectedNetProfit    BigInt
+  roiBasisPoints       Int?
+  profitPerKgSilver    Int?
+  warningsJson         Json?
+  createdAt            DateTime            @default(now())
+  plan                 TransportPlan       @relation(fields: [planId], references: [id], onDelete: Cascade)
+  item                 Item                @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  completedTripItems   CompletedTripItem[]
+
+  @@index([planId])
+  @@index([itemId, quality])
+}
+
+model CompletedTrip {
+  id                 String              @id @default(uuid())
+  userId             String
+  planId             String?             @unique
+  routeId            String?
+  server             AlbionServer
+  sourceCity         AlbionCity
+  destinationCity    AlbionCity
+  startedAt          DateTime?
+  completedAt        DateTime            @default(now())
+  actualInvestment   BigInt              @default(0)
+  actualGrossRevenue BigInt              @default(0)
+  actualTaxes        BigInt              @default(0)
+  actualSetupFees    BigInt              @default(0)
+  actualNetProfit    BigInt              @default(0)
+  notes              String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan               TransportPlan?      @relation(fields: [planId], references: [id], onDelete: SetNull)
+  route              Route?              @relation(fields: [routeId], references: [id], onDelete: SetNull)
+  items              CompletedTripItem[]
+
+  @@index([userId, completedAt])
+}
+
+model CompletedTripItem {
+  id                  String             @id @default(uuid())
+  completedTripId     String
+  planItemId          String?
+  itemId              String
+  quality             Int
+  quantity            Int
+  actualPurchasePrice BigInt
+  actualSalePrice     BigInt
+  actualInvestment    BigInt
+  actualGrossRevenue  BigInt
+  actualTaxes         BigInt             @default(0)
+  actualSetupFees     BigInt             @default(0)
+  actualNetProfit     BigInt
+  createdAt           DateTime           @default(now())
+  completedTrip       CompletedTrip      @relation(fields: [completedTripId], references: [id], onDelete: Cascade)
+  planItem            TransportPlanItem? @relation(fields: [planItemId], references: [id], onDelete: SetNull)
+  item                Item               @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([completedTripId])
+  @@index([itemId, quality])
+}
+
+model CraftRecipe {
+  id                String                  @id @default(uuid())
+  outputItemId      String
+  outputQuantity    Int                     @default(1)
+  nutritionRequired Int?
+  baseFocusCost     Int?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  outputItem        Item                    @relation("CraftRecipeOutput", fields: [outputItemId], references: [id], onDelete: Cascade)
+  ingredients       CraftRecipeIngredient[]
+  planItems         CraftPlanItem[]
+
+  @@index([outputItemId])
+}
+
+model CraftRecipeIngredient {
+  id             String      @id @default(uuid())
+  recipeId       String
+  itemId         String
+  quantity       Int
+  receivesReturn Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  recipe         CraftRecipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  item           Item        @relation("CraftRecipeIngredient", fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([recipeId, itemId])
+  @@index([itemId])
+}
+
+model CraftProfile {
+  id                            String            @id @default(uuid())
+  userId                        String
+  name                          String
+  defaultServer                 AlbionServer      @default(EUROPE)
+  materialCity                  AlbionCity?
+  craftCity                     AlbionCity?
+  sellCity                      AlbionCity?
+  craftLocationType             CraftLocationType @default(CITY)
+  resourceReturnRateBasisPoints Int               @default(1870)
+  focusReturnRateBasisPoints    Int?
+  taxRateBasisPoints            Int               @default(650)
+  setupFeeSilver                BigInt            @default(0)
+  stationFeePer100Nutrition     BigInt            @default(0)
+  maxDataAgeMinutes             Int               @default(60)
+  createdAt                     DateTime          @default(now())
+  updatedAt                     DateTime          @updatedAt
+  user                          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plans                         CraftPlan[]
+
+  @@index([userId])
+}
+
+model CraftPlan {
+  id                            String               @id @default(uuid())
+  userId                        String
+  profileId                     String?
+  server                        AlbionServer
+  materialCity                  AlbionCity
+  craftCity                     AlbionCity
+  sellCity                      AlbionCity
+  craftLocationType             CraftLocationType    @default(CITY)
+  status                        CraftPlanStatus      @default(DRAFT)
+  useFocus                      Boolean              @default(false)
+  resourceReturnRateBasisPoints Int
+  focusCost                     Int?
+  taxRateBasisPoints            Int
+  setupFeeSilver                BigInt               @default(0)
+  stationFeePer100Nutrition     BigInt               @default(0)
+  expectedMaterialCost          BigInt               @default(0)
+  expectedReturnValue           BigInt               @default(0)
+  expectedStationFee            BigInt               @default(0)
+  expectedGrossRevenue          BigInt               @default(0)
+  expectedTaxes                 BigInt               @default(0)
+  expectedNetProfit             BigInt               @default(0)
+  profitPerFocus                Int?
+  notes                         String?
+  createdAt                     DateTime             @default(now())
+  updatedAt                     DateTime             @updatedAt
+  user                          User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  profile                       CraftProfile?        @relation(fields: [profileId], references: [id], onDelete: SetNull)
+  items                         CraftPlanItem[]
+  completedBatch                CompletedCraftBatch?
+
+  @@index([userId, createdAt])
+  @@index([server, materialCity, craftCity, sellCity])
+}
+
+model CraftPlanItem {
+  id                  String                    @id @default(uuid())
+  planId              String
+  recipeId            String?
+  outputItemId        String
+  quality             Int
+  runs                Int
+  outputQuantity      Int
+  outputUnitPrice     BigInt
+  outputPriceSource   SelectedPriceSource
+  outputObservedAt    DateTime?
+  materialCost        BigInt
+  returnValue         BigInt                    @default(0)
+  stationFee          BigInt                    @default(0)
+  grossRevenue        BigInt
+  taxes               BigInt                    @default(0)
+  setupFees           BigInt                    @default(0)
+  netProfit           BigInt
+  roiBasisPoints      Int?
+  focusCost           Int?
+  profitPerFocus      Int?
+  inputWeightGrams    Int?
+  outputWeightGrams   Int?
+  warningsJson        Json?
+  createdAt           DateTime                  @default(now())
+  plan                CraftPlan                 @relation(fields: [planId], references: [id], onDelete: Cascade)
+  recipe              CraftRecipe?              @relation(fields: [recipeId], references: [id], onDelete: SetNull)
+  outputItem          Item                      @relation(fields: [outputItemId], references: [id], onDelete: Cascade)
+  ingredients         CraftPlanIngredient[]
+  completedCraftItems CompletedCraftBatchItem[]
+
+  @@index([planId])
+  @@index([outputItemId, quality])
+}
+
+model CraftPlanIngredient {
+  id                  String              @id @default(uuid())
+  planItemId          String
+  itemId              String
+  quantityRequired    Int
+  quantityReturned    Int                 @default(0)
+  netQuantityConsumed Int
+  unitPrice           BigInt
+  priceSource         SelectedPriceSource
+  observedAt          DateTime?
+  totalCost           BigInt
+  returnValue         BigInt              @default(0)
+  createdAt           DateTime            @default(now())
+  planItem            CraftPlanItem       @relation(fields: [planItemId], references: [id], onDelete: Cascade)
+  item                Item                @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([planItemId])
+  @@index([itemId])
+}
+
+model CompletedCraftBatch {
+  id                 String                    @id @default(uuid())
+  userId             String
+  planId             String?                   @unique
+  server             AlbionServer
+  materialCity       AlbionCity
+  craftCity          AlbionCity
+  sellCity           AlbionCity
+  completedAt        DateTime                  @default(now())
+  actualMaterialCost BigInt                    @default(0)
+  actualReturnValue  BigInt                    @default(0)
+  actualStationFee   BigInt                    @default(0)
+  actualGrossRevenue BigInt                    @default(0)
+  actualTaxes        BigInt                    @default(0)
+  actualNetProfit    BigInt                    @default(0)
+  notes              String?
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  user               User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan               CraftPlan?                @relation(fields: [planId], references: [id], onDelete: SetNull)
+  items              CompletedCraftBatchItem[]
+
+  @@index([userId, completedAt])
+}
+
+model CompletedCraftBatchItem {
+  id                    String              @id @default(uuid())
+  completedBatchId      String
+  planItemId            String?
+  outputItemId          String
+  quality               Int
+  runs                  Int
+  outputQuantity        Int
+  actualOutputUnitPrice BigInt
+  actualMaterialCost    BigInt
+  actualReturnValue     BigInt              @default(0)
+  actualStationFee      BigInt              @default(0)
+  actualGrossRevenue    BigInt
+  actualTaxes           BigInt              @default(0)
+  actualNetProfit       BigInt
+  createdAt             DateTime            @default(now())
+  completedBatch        CompletedCraftBatch @relation(fields: [completedBatchId], references: [id], onDelete: Cascade)
+  planItem              CraftPlanItem?      @relation(fields: [planItemId], references: [id], onDelete: SetNull)
+  outputItem            Item                @relation(fields: [outputItemId], references: [id], onDelete: Cascade)
+
+  @@index([completedBatchId])
+  @@index([outputItemId, quality])
+}
+
+model UserSetting {
+  id                        String       @id @default(uuid())
+  userId                    String       @unique
+  defaultServer             AlbionServer @default(EUROPE)
+  defaultSourceCity         AlbionCity?
+  defaultDestinationCity    AlbionCity?
+  defaultCapitalSilver      BigInt?
+  defaultCapacityGrams      Int?
+  defaultTaxRateBasisPoints Int          @default(650)
+  defaultSetupFeeSilver     BigInt       @default(0)
+  maxDataAgeMinutes         Int          @default(60)
+  showStalePrices           Boolean      @default(false)
+  createdAt                 DateTime     @default(now())
+  updatedAt                 DateTime     @updatedAt
+  user                      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
