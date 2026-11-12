@@ -276,6 +276,8 @@ export default function BlackMarketPage() {
           return;
         }
         const checkedIds = event.data.rollingCoverage?.itemIds ?? requestedItemIds;
+        // Explicit item scans and rolling batches update the current session.
+        // Retain the full saved dataset while replacing only checked item routes.
         const updated = {
           ...(completedData.current ?? event.data),
           opportunities: replaceScannedOpportunities(completedData.current?.opportunities ?? [], event.data.opportunities, checkedIds),
@@ -657,7 +659,8 @@ export default function BlackMarketPage() {
             {opportunities.length > RESULTS_PER_PAGE ? <Pagination page={currentPage} totalPages={totalPages} onPageChange={changePage} /> : null}
           </div>
           {data ? <div className="mt-1 text-xs text-slate-500">
-            <p>{data.scannedItems.toLocaleString()} items · {data.scannedMarkets} origin markets · {data.evaluatedRoutes.toLocaleString()} opportunities evaluated · {data.freshPriceRows.toLocaleString()} live price rows · {(data.fallbackPriceRows ?? 0).toLocaleString()} last-known rows · {(data.estimatedPriceRows ?? 0).toLocaleString()} historical estimates · {(data.missingPriceRows ?? 0).toLocaleString()} missing rows</p>
+            <p>{data.scannedItems.toLocaleString()} items · {data.scannedMarkets} origin markets · {data.evaluatedRoutes.toLocaleString()} opportunities evaluated · {data.freshPriceRows.toLocaleString()} public API price rows (not necessarily fresh) · {(data.fallbackPriceRows ?? 0).toLocaleString()} last-known rows · {(data.estimatedPriceRows ?? 0).toLocaleString()} historical estimates · {(data.missingPriceRows ?? 0).toLocaleString()} missing rows</p>
+            <p className="mt-1 text-amber-700">Market timestamps show when orders were observed, not when the API was queried. Estimated quantities are not confirmed market stock.</p>
             {(data.estimatedPriceRows ?? 0) > 0 ? <p className="mt-1 text-amber-700">Low-data mode uses conservative 7-day history when a live or last-known value is absent. A historical destination estimate is not a live buy order; verify it in game before transporting.</p> : null}
             {(data.missingPriceRows ?? 0) > 0 ? <p className="mt-1 text-amber-700">Missing means no usable live, last-known, private, or historical price was available for that item and market.</p> : null}
           </div> : null}
