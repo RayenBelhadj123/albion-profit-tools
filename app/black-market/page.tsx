@@ -5,6 +5,7 @@ import { Activity, ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, Chevron
 
 import { AlbionItemIcon } from "@/app/components/albion-item-icon";
 import { getMarketFeeRates, type MarketSaleMethod } from "@/lib/market/fees";
+import { repriceMarketOpportunity } from "@/lib/transport/reprice-market-opportunity";
 import { LiveCoverageQueue, replaceScannedOpportunities, type CoverageJob, type RollingCoverageProgress } from "@/lib/market/live-coverage-queue";
 
 type Opportunity = {
@@ -17,6 +18,7 @@ type Opportunity = {
   purchasePrice: string | null;
   expectedSalePrice: string | null;
   recommendedQuantity: number;
+  totalWeightGrams?: number | null;
   investment: string;
   taxes: string;
   setupFees: string;
@@ -134,7 +136,8 @@ export default function BlackMarketPage() {
       sourceCity: "BRIDGEWATCH",
       destinationCity,
       allSources: "true",
-      isPremium: String(isPremium),
+      // Store and retrieve a single Premium-priced snapshot; fee changes are recalculated locally.
+      isPremium: "true",
       saleMethod,
       quality: "6",
       sortBy: "combined",
@@ -145,7 +148,7 @@ export default function BlackMarketPage() {
       showAllPriceMatches: "true",
     });
     return params;
-  }, [destinationCity, isPremium, saleMethod, server]);
+  }, [destinationCity, saleMethod, server]);
 
   const scan = useCallback(async (mode: ScanMode = "FULL", job?: CoverageJob): Promise<FlipsResponse | null | undefined> => {
     if (scanInProgress.current) return;
@@ -154,13 +157,16 @@ export default function BlackMarketPage() {
     abortController.current = controller;
     if (job) automaticScanController.current = controller;
     let finishedResult: FlipsResponse | null = null;
-    setLoading(true);
-    setPage(1);
-    setProgress(null);
-    scanOpportunityKeys.current.clear();
-    setScanOpportunitiesFound(0);
-    setNotice(null);
-    setError(null);
+    // Rolling jobs should update the rows silently, never reset the user's page or controls.
+    if (!job) {
+      setLoading(true);
+      setPage(1);
+      setProgress(null);
+      scanOpportunityKeys.current.clear();
+      setScanOpportunitiesFound(0);
+      setNotice(null);
+      setError(null);
+    }
     try {
       const params = buildScanParams();
       const isFullCoverage = mode === "FULL" && !itemIds.trim();
@@ -210,7 +216,7 @@ export default function BlackMarketPage() {
         if (event.type === "started") {
           totalItems = event.scannedItems;
           scannedMarkets = event.scannedMarkets;
-          setProgress({ phase: "combined", completedBatches: 0, totalBatches: 0, processedItems: 0, totalItems, elapsedMilliseconds: 0, cachedBatches: 0, freshPriceRows: 0, fallbackPriceRows: 0, estimatedPriceRows: 0, missingPriceRows: 0 });
+          if (!job) setProgress({ phase: "combined", completedBatches: 0, totalBatches: 0, processedItems: 0, totalItems, elapsedMilliseconds: 0, cachedBatches: 0, freshPriceRows: 0, fallbackPriceRows: 0, estimatedPriceRows: 0, missingPriceRows: 0 });
           setData((current) => current ?? {
             opportunities: [],
             scannedAt: new Date().toISOString(),
@@ -228,8 +234,8 @@ export default function BlackMarketPage() {
           for (const opportunity of event.opportunities) {
             scanOpportunityKeys.current.add(`${opportunity.itemId}\u0000${opportunity.quality}\u0000${opportunity.sourceCity}\u0000${opportunity.destinationCity}`);
           }
-          setScanOpportunitiesFound(scanOpportunityKeys.current.size);
-          setProgress({
+          if (!job) setScanOpportunitiesFound(scanOpportunityKeys.current.size);
+          if (!job) setProgress({
             phase: event.phase,
             completedBatches: event.completedBatches,
             totalBatches: event.totalBatches,
@@ -261,7 +267,7 @@ export default function BlackMarketPage() {
         if (job?.kind === "ROLLING" && !event.data.rollingCoverage) throw new Error("Rolling coverage progress is missing. Please reload the app.");
         completed = true;
         finishedResult = event.data;
-        setProgress((current) => current ? { ...current, completedBatches: current.totalBatches, processedItems: current.totalItems } : current);
+        if (!job) setProgress((current) => current ? { ...current, completedBatches: current.totalBatches, processedItems: current.totalItems } : current);
         if (isFullCoverage) {
           completedData.current = event.data;
           setData(event.data);
@@ -270,15 +276,15 @@ export default function BlackMarketPage() {
           return;
         }
         const checkedIds = event.data.rollingCoverage?.itemIds ?? requestedItemIds;
+        // Explicit item scans and rolling batches update the current session.
+        // Retain the full saved dataset while replacing only checked item routes.
         const updated = {
           ...(completedData.current ?? event.data),
           opportunities: replaceScannedOpportunities(completedData.current?.opportunities ?? [], event.data.opportunities, checkedIds),
         };
         completedData.current = updated;
         setData(updated);
-        setNotice(job
-          ? `Updated ${checkedIds.length.toLocaleString()} items. Rolling updates do not change the saved full-coverage date.`
-          : "Fast scan completed. Refreshed prices are visible for this session; the saved coverage and its date remain unchanged until full coverage completes.");
+        if (!job) setNotice("Fast scan completed. Refreshed prices are visible for this session; the saved coverage and its date remain unchanged until full coverage completes.");
       };
 
       while (true) {
@@ -305,7 +311,7 @@ export default function BlackMarketPage() {
       if (abortController.current === controller) {
         abortController.current = null;
         scanInProgress.current = false;
-        setLoading(false);
+        if (!job) setLoading(false);
       }
     }
   }, [buildScanParams, itemIds]);
@@ -345,12 +351,18 @@ export default function BlackMarketPage() {
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [itemSearch]);
 
+  const restoredMarketKey = useRef<string | null>(null);
   useEffect(() => {
     const controller = new AbortController();
+    const marketKey = `${server}:${destinationCity}:${saleMethod}`;
+    const marketChanged = restoredMarketKey.current !== marketKey;
+    restoredMarketKey.current = marketKey;
     async function restoreLatestScan() {
       setRestoringCoverage(true);
       const params = buildScanParams();
-      if (!scanInProgress.current) {
+      // Changing only quality must not erase previously displayed opportunities.
+      // Market/server switches do require a clean slate to avoid cross-market data.
+      if (marketChanged && !scanInProgress.current) {
         completedData.current = null;
         setData(null);
         setLastScannedAt(null);
@@ -358,31 +370,21 @@ export default function BlackMarketPage() {
       }
       params.set("latest", "true");
       params.set("restoreQuality", quality);
-      params.set("restoreLimit", quality === "0" ? "400" : "200");
+      // One expanded request is cheaper and avoids preview -> expanded UI jumps.
+      params.set("restoreLimit", quality === "0" ? "4000" : "2000");
       try {
         const response = await fetch(`/api/black-market-flips?${params}`, { signal: controller.signal });
-        if (response.status === 404) return;
+        if (response.status === 404) {
+          if (!controller.signal.aborted) setNotice("No saved coverage for this market and quality. Scan a few items to start collecting.");
+          return;
+        }
         if (!response.ok) throw new Error("Could not restore the latest scan.");
         const restored = (await response.json()) as FlipsResponse;
-        if (scanInProgress.current) return;
+        if (scanInProgress.current || controller.signal.aborted) return;
         completedData.current = restored;
         setData(restored);
         setLastScannedAt(new Date(restored.scannedAt));
-        setNotice("Loaded saved coverage. Expanding the opportunity pool in the background…");
-        const expandedParams = new URLSearchParams(params);
-        expandedParams.set("restoreLimit", quality === "0" ? "4000" : "2000");
-        void fetch(`/api/black-market-flips?${expandedParams}`, { signal: controller.signal })
-          .then(async (expandedResponse) => {
-            if (!expandedResponse.ok) return null;
-            return expandedResponse.json() as Promise<FlipsResponse>;
-          })
-          .then((expanded) => {
-            if (!expanded || scanInProgress.current || controller.signal.aborted) return;
-            completedData.current = expanded;
-            setData(expanded);
-            setNotice(`Loaded ${expanded.opportunities.length.toLocaleString()} saved opportunities. Refresh whenever you want newer prices.`);
-          })
-          .catch(() => undefined);
+        setNotice(`Loaded ${restored.opportunities.length.toLocaleString()} saved opportunities. Refresh to check newer public prices.`);
       } catch (restoreError) {
         if (!controller.signal.aborted) {
           setError(restoreError instanceof Error ? restoreError.message : "Could not restore the latest scan.");
@@ -393,7 +395,12 @@ export default function BlackMarketPage() {
     }
     void restoreLatestScan();
     return () => controller.abort();
-  }, [buildScanParams, quality]);
+  }, [buildScanParams, quality, destinationCity, saleMethod, server]);
+
+  const scanRef = useRef(scan);
+  const restoringCoverageRef = useRef(restoringCoverage);
+  useEffect(() => { scanRef.current = scan; }, [scan]);
+  useEffect(() => { restoringCoverageRef.current = restoringCoverage; }, [restoringCoverage]);
 
   useEffect(() => {
     if (!liveScan) return;
@@ -406,7 +413,7 @@ export default function BlackMarketPage() {
     const schedule = (delay: number) => { if (!stopped) timer = window.setTimeout(() => void tick(), delay); };
     const tick = async () => {
       if (stopped) return;
-      if (document.visibilityState === "hidden" || !navigator.onLine || restoringCoverage || scanInProgress.current) {
+      if (document.visibilityState === "hidden" || !navigator.onLine || restoringCoverageRef.current || scanInProgress.current) {
         report(!navigator.onLine ? "Paused · offline" : document.visibilityState === "hidden" ? "Paused · tab hidden" : "Waiting for the current operation");
         schedule(1_000);
         return;
@@ -416,7 +423,7 @@ export default function BlackMarketPage() {
       const job = queue.next(priorityIds);
       report(job.kind === "ROLLING" ? "Checking the next catalog batch" : `Refreshing ${job.itemIds.length} priority items`);
       const started = Date.now();
-      const result = await scan(job.kind === "ROLLING" ? "ROLLING" : "LAST_RESULTS", job);
+      const result = await scanRef.current(job.kind === "ROLLING" ? "ROLLING" : "LAST_RESULTS", job);
       if (stopped) return;
       if (result === undefined) { schedule(1_000); return; }
       if (result === null) {
@@ -434,7 +441,7 @@ export default function BlackMarketPage() {
       window.clearTimeout(timer);
       automaticScanController.current?.abort();
     };
-  }, [liveScan, scan, itemIds, quality, restoringCoverage]);
+  }, [liveScan, server, destinationCity, saleMethod]);
 
   useEffect(() => () => {
     abortController.current?.abort();
@@ -442,19 +449,23 @@ export default function BlackMarketPage() {
   }, []);
 
   const deferredOpportunities = useDeferredValue(data?.opportunities ?? []);
-  const matchingCoverageCount = useMemo(() => deferredOpportunities.filter((item) =>
+  const pricedOpportunities = useMemo(
+    () => isPremium ? deferredOpportunities : deferredOpportunities.map((row) => repriceMarketOpportunity(row, false, saleMethod)),
+    [deferredOpportunities, isPremium, saleMethod],
+  );
+  const matchingCoverageCount = useMemo(() => pricedOpportunities.filter((item) =>
     (originCity === "ALL" || item.sourceCity === originCity) &&
     (quality === "0" ? item.quality >= 1 && item.quality <= 4 : item.quality === Number(quality)) &&
     (category === "ALL" || item.category === category),
-  ).length, [category, deferredOpportunities, originCity, quality]);
+  ).length, [category, pricedOpportunities, originCity, quality]);
   const opportunities = useMemo(() => {
     const minimumProfitSilver = parseNonnegativeBigInt(minimumProfit);
     const minimumRoiBasisPoints = Math.max(0, Math.round(parseNonnegativeNumber(minimumRoiPercent) * 100));
     const maximumSourceAge = parsePositiveNumber(maxSourceDataAgeMinutes, 60);
     const maximumDestinationAge = parsePositiveNumber(maxDestinationDataAgeMinutes, 1_440);
     const matchingOrigin = originCity === "ALL"
-      ? deferredOpportunities
-      : deferredOpportunities.filter((item) => item.sourceCity === originCity);
+      ? pricedOpportunities
+      : pricedOpportunities.filter((item) => item.sourceCity === originCity);
     const matchingQuality = quality === "0"
       ? matchingOrigin.filter((item) => item.quality >= 1 && item.quality <= 4)
       : matchingOrigin.filter((item) => item.quality === Number(quality));
@@ -478,7 +489,7 @@ export default function BlackMarketPage() {
       maximumDestinationAge,
       sortDirection,
     );
-  }, [category, deferredOpportunities, maxDestinationDataAgeMinutes, maxSourceDataAgeMinutes, minimumProfit, minimumRoiPercent, originCity, quality, showAllPriceMatches, sortBy, sortDirection]);
+  }, [category, pricedOpportunities, maxDestinationDataAgeMinutes, maxSourceDataAgeMinutes, minimumProfit, minimumRoiPercent, originCity, quality, showAllPriceMatches, sortBy, sortDirection]);
   const resultSummary = useMemo(() => summarizeOpportunities(opportunities), [opportunities]);
   const feeRates = getMarketFeeRates({ isPremium, saleMethod });
   const totalPages = Math.max(1, Math.ceil(opportunities.length / RESULTS_PER_PAGE));
@@ -648,7 +659,8 @@ export default function BlackMarketPage() {
             {opportunities.length > RESULTS_PER_PAGE ? <Pagination page={currentPage} totalPages={totalPages} onPageChange={changePage} /> : null}
           </div>
           {data ? <div className="mt-1 text-xs text-slate-500">
-            <p>{data.scannedItems.toLocaleString()} items · {data.scannedMarkets} origin markets · {data.evaluatedRoutes.toLocaleString()} opportunities evaluated · {data.freshPriceRows.toLocaleString()} live price rows · {(data.fallbackPriceRows ?? 0).toLocaleString()} last-known rows · {(data.estimatedPriceRows ?? 0).toLocaleString()} historical estimates · {(data.missingPriceRows ?? 0).toLocaleString()} missing rows</p>
+            <p>{data.scannedItems.toLocaleString()} items · {data.scannedMarkets} origin markets · {data.evaluatedRoutes.toLocaleString()} opportunities evaluated · {data.freshPriceRows.toLocaleString()} public API price rows (not necessarily fresh) · {(data.fallbackPriceRows ?? 0).toLocaleString()} last-known rows · {(data.estimatedPriceRows ?? 0).toLocaleString()} historical estimates · {(data.missingPriceRows ?? 0).toLocaleString()} missing rows</p>
+            <p className="mt-1 text-amber-700">Market timestamps show when orders were observed, not when the API was queried. Estimated quantities are not confirmed market stock.</p>
             {(data.estimatedPriceRows ?? 0) > 0 ? <p className="mt-1 text-amber-700">Low-data mode uses conservative 7-day history when a live or last-known value is absent. A historical destination estimate is not a live buy order; verify it in game before transporting.</p> : null}
             {(data.missingPriceRows ?? 0) > 0 ? <p className="mt-1 text-amber-700">Missing means no usable live, last-known, private, or historical price was available for that item and market.</p> : null}
           </div> : null}
