@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 
 const navItems = [
   { href: "/black-market", label: "Transport Scanner" },
+  { href: "/market", label: "Market tools" },
 ] as const;
 
 export function SiteNav() {

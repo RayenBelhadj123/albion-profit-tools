@@ -1,6 +1,6 @@
 # Albion Transport / Profit Tools
 
-Albion Online market-route, crafting, and refining tools built with Next.js, TypeScript, PostgreSQL, and Prisma. See [local setup and rolling coverage](docs/LOCAL-RUNNING.md) for database setup, Windows startup, refresh behavior, and verification commands.
+Albion Online market-route, crafting, and refining tools built with Next.js, TypeScript, PostgreSQL, and Prisma. See [local setup and rolling coverage](docs/LOCAL-RUNNING.md) for database setup, Windows startup, refresh behavior, and verification commands. The separate [Market tools page](docs/MARKET-TOOLS.md) provides public price/history lookup and browser-local alerts without PostgreSQL.
 
 Public prices are community observations, not guaranteed executable orders. Private prices come from authenticated manual entry or CSV imports.
 

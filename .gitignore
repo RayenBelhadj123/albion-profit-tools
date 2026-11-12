@@ -47,6 +47,7 @@ yarn-error.log*
 *.zip
 *.jar
 /output/
+/.playwright-cli/
 /dist/
 
 # vercel
