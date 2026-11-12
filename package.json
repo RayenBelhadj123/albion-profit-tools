@@ -9,37 +9,44 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:browser": "node scripts/scanner-browser-qa.cjs",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
     "prisma:seed": "prisma db seed",
     "items:sync": "tsx prisma/sync-items.ts"
   },
   "dependencies": {
-    "@prisma/adapter-pg": "^7.9.1",
-    "@prisma/adapter-ppg": "^7.9.1",
-    "@prisma/client": "^7.9.1",
+    "@prisma/adapter-pg": "^7.10.1",
+    "@prisma/adapter-ppg": "^7.10.1",
+    "@prisma/client": "^7.10.1",
     "@prisma/extension-accelerate": "^3.0.1",
     "@prisma/ppg": "^1.0.1",
     "lucide-react": "^1.29.0",
-    "next": "16.3.0",
+    "next": "16.4.6",
     "pg": "^8.16.3",
-    "prisma": "^7.9.1",
+    "prisma": "^7.10.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "zod": "^4.4.3"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@types/node": "^22.20.5",
     "@types/pg": "^8.15.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.3.0",
+    "eslint-config-next": "16.4.6",
+    "playwright": "1.65.0",
     "tailwindcss": "^4",
     "tsx": "^4.20.4",
     "typescript": "^5",
-    "vitest": "^3.2.4"
+    "vitest": "^5.1.0"
+  },
+  "overrides": {
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.8"
+    }
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

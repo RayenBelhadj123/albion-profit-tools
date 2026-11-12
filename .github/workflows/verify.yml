@@ -1,0 +1,54 @@
+name: Verify scanner
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'fix/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-scanner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/albion_ci
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run prisma:generate
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - run: npm audit --omit=dev
+      - run: npx playwright install --with-deps chromium
+      - name: Start production app for fixture-backed browser tests
+        env:
+          HOSTNAME: 127.0.0.1
+          PORT: '3100'
+        run: |
+          node .next/standalone/server.js > "$RUNNER_TEMP/albion-server.log" 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --max-time 3 http://127.0.0.1:3100/black-market > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - run: npm run test:browser
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: scanner-browser-qa
+          path: output/playwright/scanner/
+          if-no-files-found: ignore
