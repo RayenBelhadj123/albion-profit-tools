@@ -98,7 +98,7 @@ const querySchema = z.strictObject({
   }
 }).transform((input) => ({ ...input, itemIds: input.itemIds ?? [] }));
 
-type ScanInput = z.infer<typeof querySchema>;
+type ScanInput = z.infer<typeof querySchema> & { userId: string | null };
 type BlackMarketScanResult = {
   rollingCoverage?: RollingCoverage;
   opportunities: ScoredOpportunity[];
@@ -138,7 +138,9 @@ export async function POST(request: Request) {
   return respondToScanRequest(parsed.data, request);
 }
 
-async function respondToScanRequest(input: ScanInput, request: Request) {
+async function respondToScanRequest(parsed: z.infer<typeof querySchema>, request: Request) {
+  const user = await getCurrentUser();
+  const input: ScanInput = { ...parsed, userId: user?.id ?? null };
   if (input.destinationCity === "BLACK_MARKET" && input.saleMethod === "SELL_ORDER") {
     return jsonResponse({ error: "Black Market supports fast selling to buy orders, not player sell orders." }, { status: 400 });
   }
@@ -301,7 +303,6 @@ function summarizeScanResults(results: BlackMarketScanResult[]) {
 }
 
 async function runBlackMarketScanForQuality(input: ScanInput, hooks: ScanHooks = {}, selectedItems?: CatalogItem[]): Promise<BlackMarketScanResult> {
-  const currentUser = await getCurrentUser();
   const sourceCities = (input.allSources ? [...royalCities] : [input.sourceCity])
     .filter((city) => city !== input.destinationCity);
   const routeDestinationCity = input.destinationCity === "BLACK_MARKET" ? "CAERLEON" : input.destinationCity;
@@ -387,9 +388,9 @@ async function runBlackMarketScanForQuality(input: ScanInput, hooks: ScanHooks =
         // globalThis after the schema changes. Public coverage must continue
         // even when that optional private-observation delegate is unavailable.
         const privateObservationDelegate = prisma.privateMarketObservation;
-        const privateObservations = currentUser && privateObservationDelegate ? await privateObservationDelegate.findMany({
+        const privateObservations = input.userId && privateObservationDelegate ? await privateObservationDelegate.findMany({
           where: {
-            userId: currentUser.id,
+            userId: input.userId,
             server: input.server,
             itemId: { in: progress.itemIds },
             city: { in: marketLocations.map(toPrismaCity).filter((city) => city !== null) },
@@ -717,6 +718,9 @@ async function getCatalogItems(itemIds: string[]): Promise<CatalogItem[]> {
 
 function scanCacheKey(input: ScanInput) {
   return JSON.stringify({
+    // v2 deliberately cannot read legacy shared snapshots containing overrides.
+    version: 2,
+    userId: input.userId,
     server: input.server,
     sourceCity: input.sourceCity,
     destinationCity: input.destinationCity,
@@ -1011,7 +1015,7 @@ function applyCombinedScores(
 ) {
   const maxProfit = items.reduce((max, item) => item.netProfit > max ? item.netProfit : max, 0n);
   const maxMarketValue = items.reduce((max, item) => item.marketValue > max ? item.marketValue : max, 0n);
-  const maxRoi = Math.max(0, ...items.map((item) => item.roiBasisPoints ?? 0));
+  const maxRoi = items.reduce((maximum, item) => Math.max(maximum, item.roiBasisPoints ?? 0), 0);
   for (const item of items) {
     const sourceFreshness = Math.max(
       0,

@@ -1,39 +1,14 @@
 "use client";
 
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { Activity, ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, ChevronsUpDown, Copy, Plus, Search, Square, X } from "lucide-react";
 
+import { ScannerSession } from "@/lib/market/scanner-session";
+import { defaultSortDirection, meetsScannerThresholds, rankProgressiveOpportunities, type Opportunity, type SortDirection, type SortKey } from "@/lib/market/scanner-view";
+import { repriceMarketOpportunity } from "@/lib/transport/reprice-market-opportunity";
 import { AlbionItemIcon } from "@/app/components/albion-item-icon";
 import { getMarketFeeRates, type MarketSaleMethod } from "@/lib/market/fees";
 import { LiveCoverageQueue, replaceScannedOpportunities, type CoverageJob, type RollingCoverageProgress } from "@/lib/market/live-coverage-queue";
-
-type Opportunity = {
-  itemId: string;
-  quality: number;
-  itemName: string;
-  category: string;
-  sourceCity: string;
-  destinationCity: string;
-  purchasePrice: string | null;
-  expectedSalePrice: string | null;
-  recommendedQuantity: number;
-  investment: string;
-  taxes: string;
-  setupFees: string;
-  netProfit: string;
-  roiBasisPoints: number | null;
-  profitPerKgSilver: number | null;
-  marketValue: string;
-  sourcePriceAgeMinutes: number | null;
-  destinationPriceAgeMinutes: number | null;
-  score: number;
-  confidence: "LOW" | "MEDIUM" | "HIGH";
-  warnings: string[];
-  purchasePriceSource: string | null;
-  salePriceSource: string | null;
-  purchasePriceLabel?: string;
-  salePriceLabel?: string;
-};
 
 type FlipsResponse = {
   opportunities: Opportunity[];
@@ -56,8 +31,6 @@ type AlbionServer = "EUROPE" | "AMERICAS" | "ASIA";
 type RoyalCity = "BRIDGEWATCH" | "CAERLEON" | "FORT_STERLING" | "LYMHURST" | "MARTLOCK" | "THETFORD";
 type OriginCity = "ALL" | RoyalCity;
 type DestinationCity = "BLACK_MARKET" | RoyalCity;
-type SortKey = "combined" | "item" | "route" | "purchasePrice" | "expectedSalePrice" | "quantity" | "investment" | "fees" | "profit" | "roi" | "profitPerKg" | "marketValue" | "sourceFreshness" | "destinationFreshness" | "confidence";
-type SortDirection = "asc" | "desc";
 type ScanMode = "FULL" | "LAST_RESULTS" | "ROLLING";
 type ItemQuality = "0" | "1" | "2" | "3" | "4" | "5";
 const royalCityOptions: Array<{ value: RoyalCity; label: string }> = [
@@ -109,9 +82,17 @@ export default function BlackMarketPage() {
   const [minimumRoiPercent, setMinimumRoiPercent] = useState("20");
   const [showAllPriceMatches, setShowAllPriceMatches] = useState(false);
   const [catalogSize, setCatalogSize] = useState<number | null>(null);
-  const [data, setData] = useState<FlipsResponse | null>(null);
+  const marketKey = `${server}:${destinationCity}:${saleMethod}`;
+  const [session] = useState(() => new ScannerSession<FlipsResponse>());
+  const [storedData, setStoredData] = useState<{ key: string; value: FlipsResponse | null } | null>(null);
+  const data = storedData?.key === marketKey ? storedData.value : null;
+  const setData = useCallback((next: SetStateAction<FlipsResponse | null>) => {
+    setStoredData((current) => ({ key: marketKey, value: typeof next === "function"
+      ? next(current?.key === marketKey ? current.value : null) : next }));
+  }, [marketKey]);
   const [restoringCoverage, setRestoringCoverage] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [backgroundLoading, setBackgroundLoading] = useState(false);
   const [liveScan, setLiveScan] = useState(false);
   const [liveCoverageStatus, setLiveCoverageStatus] = useState<LiveCoverageStatus | null>(null);
   const [lastScannedAt, setLastScannedAt] = useState<Date | null>(null);
@@ -134,7 +115,7 @@ export default function BlackMarketPage() {
       sourceCity: "BRIDGEWATCH",
       destinationCity,
       allSources: "true",
-      isPremium: String(isPremium),
+      isPremium: "true",
       saleMethod,
       quality: "6",
       sortBy: "combined",
@@ -145,22 +126,27 @@ export default function BlackMarketPage() {
       showAllPriceMatches: "true",
     });
     return params;
-  }, [destinationCity, isPremium, saleMethod, server]);
+  }, [destinationCity, saleMethod, server]);
 
   const scan = useCallback(async (mode: ScanMode = "FULL", job?: CoverageJob): Promise<FlipsResponse | null | undefined> => {
-    if (scanInProgress.current) return;
+    const operation = session.begin("scan");
+    if (!operation) return;
     scanInProgress.current = true;
-    const controller = new AbortController();
+    const controller = operation.controller;
+    const accepts = () => session.accepts(operation);
     abortController.current = controller;
     if (job) automaticScanController.current = controller;
     let finishedResult: FlipsResponse | null = null;
-    setLoading(true);
-    setPage(1);
+    setRestoringCoverage(false);
+    if (job) setBackgroundLoading(true);
+    else setLoading(true);
     setProgress(null);
     scanOpportunityKeys.current.clear();
     setScanOpportunitiesFound(0);
-    setNotice(null);
-    setError(null);
+    if (!job) {
+      setNotice(null);
+      setError(null);
+    }
     try {
       const params = buildScanParams();
       const isFullCoverage = mode === "FULL" && !itemIds.trim();
@@ -206,7 +192,7 @@ export default function BlackMarketPage() {
       let completed = false;
 
       const handleEvent = (event: StreamEvent) => {
-        if (controller.signal.aborted) return;
+        if (!accepts()) return;
         if (event.type === "started") {
           totalItems = event.scannedItems;
           scannedMarkets = event.scannedMarkets;
@@ -266,7 +252,8 @@ export default function BlackMarketPage() {
           completedData.current = event.data;
           setData(event.data);
           setLastScannedAt(new Date(event.data.scannedAt));
-          setNotice("Full coverage completed and saved. This is now the snapshot restored after a page refresh.");
+          session.save(operation, event.data);
+          if (!job) setNotice("Full coverage completed and saved. This is now the snapshot restored after a page refresh.");
           return;
         }
         const checkedIds = event.data.rollingCoverage?.itemIds ?? requestedItemIds;
@@ -276,9 +263,8 @@ export default function BlackMarketPage() {
         };
         completedData.current = updated;
         setData(updated);
-        setNotice(job
-          ? `Updated ${checkedIds.length.toLocaleString()} items. Rolling updates do not change the saved full-coverage date.`
-          : "Fast scan completed. Refreshed prices are visible for this session; the saved coverage and its date remain unchanged until full coverage completes.");
+        session.save(operation, updated);
+        if (!job) setNotice("Fast scan completed. Refreshed prices are visible for this session; the saved coverage and its date remain unchanged until full coverage completes.");
       };
 
       while (true) {
@@ -293,29 +279,46 @@ export default function BlackMarketPage() {
       }
       if (buffer.trim()) handleEvent(JSON.parse(buffer) as StreamEvent);
       if (!completed && !controller.signal.aborted) throw new Error("Market scan ended before completion.");
-      return controller.signal.aborted ? undefined : finishedResult;
+      return accepts() ? finishedResult : undefined;
     } catch (scanError) {
-      if (!controller.signal.aborted) {
+      if (accepts()) {
         if (completedData.current) setData(completedData.current);
-        setError(scanError instanceof Error ? scanError.message : "Scan failed.");
+        if (!job) setError(scanError instanceof Error ? scanError.message : "Scan failed.");
       }
-      return controller.signal.aborted ? undefined : null;
+      return accepts() ? null : undefined;
     } finally {
       if (automaticScanController.current === controller) automaticScanController.current = null;
-      if (abortController.current === controller) {
+      if (session.finish(operation)) {
         abortController.current = null;
         scanInProgress.current = false;
         setLoading(false);
+        setBackgroundLoading(false);
       }
     }
-  }, [buildScanParams, itemIds]);
+  }, [buildScanParams, itemIds, session, setData]);
 
   const cancelScan = useCallback(() => {
     setLiveScan(false);
     setLiveCoverageStatus(null);
     setNotice(completedData.current ? "Coverage cancelled. The last completed results are still shown." : "Coverage cancelled. Partial results are still shown.");
-    abortController.current?.abort();
-  }, []);
+    session.cancel();
+    abortController.current = null;
+    automaticScanController.current = null;
+    scanInProgress.current = false;
+    setLoading(false);
+    setBackgroundLoading(false);
+  }, [session]);
+
+  const cancelAutomaticScan = useCallback(() => {
+    const controller = automaticScanController.current;
+    // Only release the automatic operation that still owns the scan state.
+    if (!controller || abortController.current !== controller) return;
+    session.cancel();
+    automaticScanController.current = null;
+    abortController.current = null;
+    scanInProgress.current = false;
+    setBackgroundLoading(false);
+  }, [session]);
 
   useEffect(() => {
     let active = true;
@@ -328,7 +331,7 @@ export default function BlackMarketPage() {
         setCategories(summary.categories);
       }
     }
-    void loadCatalog();
+    void loadCatalog().catch(() => { if (active) setError("Could not load the item catalog."); });
     return () => { active = false; };
   }, []);
 
@@ -345,55 +348,64 @@ export default function BlackMarketPage() {
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [itemSearch]);
 
+  // Market handlers invalidate work synchronously, before a late stream can run.
+  const switchMarket = useCallback((nextServer: AlbionServer, nextDestination: DestinationCity, nextMethod: MarketSaleMethod) => {
+    const cached = session.select(`${nextServer}:${nextDestination}:${nextMethod}`);
+    completedData.current = cached ?? null;
+    abortController.current = null;
+    automaticScanController.current = null;
+    scanInProgress.current = false;
+    setLoading(false);
+    setBackgroundLoading(false);
+    setProgress(null);
+    setNotice(null);
+    setError(null);
+    setLastScannedAt(cached ? new Date(cached.scannedAt) : null);
+    setServer(nextServer);
+    setDestinationCity(nextDestination);
+    setSaleMethod(nextMethod);
+  }, [session]);
+
   useEffect(() => {
-    const controller = new AbortController();
     async function restoreLatestScan() {
-      setRestoringCoverage(true);
+      const cached = session.select(marketKey);
+      completedData.current = cached ?? null;
+      setData(cached ?? null);
+      setLastScannedAt(cached ? new Date(cached.scannedAt) : null);
+      setRestoringCoverage(!cached);
+      if (cached) return;
+      const operation = session.begin("restore");
+      if (!operation) return;
       const params = buildScanParams();
-      if (!scanInProgress.current) {
-        completedData.current = null;
-        setData(null);
-        setLastScannedAt(null);
-        setNotice(null);
-      }
       params.set("latest", "true");
-      params.set("restoreQuality", quality);
-      params.set("restoreLimit", quality === "0" ? "400" : "200");
+      // Restore the entire all-quality pool once. Display settings never load slices.
       try {
-        const response = await fetch(`/api/black-market-flips?${params}`, { signal: controller.signal });
-        if (response.status === 404) return;
+        const response = await fetch(`/api/black-market-flips?${params}`, { signal: operation.controller.signal });
+        if (!session.accepts(operation) || response.status === 404) return;
         if (!response.ok) throw new Error("Could not restore the latest scan.");
         const restored = (await response.json()) as FlipsResponse;
-        if (scanInProgress.current) return;
+        if (!session.accepts(operation)) return;
         completedData.current = restored;
+        session.save(operation, restored);
         setData(restored);
         setLastScannedAt(new Date(restored.scannedAt));
-        setNotice("Loaded saved coverage. Expanding the opportunity pool in the background…");
-        const expandedParams = new URLSearchParams(params);
-        expandedParams.set("restoreLimit", quality === "0" ? "4000" : "2000");
-        void fetch(`/api/black-market-flips?${expandedParams}`, { signal: controller.signal })
-          .then(async (expandedResponse) => {
-            if (!expandedResponse.ok) return null;
-            return expandedResponse.json() as Promise<FlipsResponse>;
-          })
-          .then((expanded) => {
-            if (!expanded || scanInProgress.current || controller.signal.aborted) return;
-            completedData.current = expanded;
-            setData(expanded);
-            setNotice(`Loaded ${expanded.opportunities.length.toLocaleString()} saved opportunities. Refresh whenever you want newer prices.`);
-          })
-          .catch(() => undefined);
+        setNotice(`Loaded ${restored.opportunities.length.toLocaleString()} saved opportunities. Refresh to check newer public prices.`);
       } catch (restoreError) {
-        if (!controller.signal.aborted) {
-          setError(restoreError instanceof Error ? restoreError.message : "Could not restore the latest scan.");
-        }
+        if (session.accepts(operation)) setError(restoreError instanceof Error ? restoreError.message : "Could not restore the latest scan.");
       } finally {
-        if (!controller.signal.aborted) setRestoringCoverage(false);
+        if (session.finish(operation)) setRestoringCoverage(false);
       }
     }
     void restoreLatestScan();
-    return () => controller.abort();
-  }, [buildScanParams, quality]);
+    return () => session.cancel();
+  }, [buildScanParams, marketKey, session, setData]);
+
+  const scanRef = useRef(scan);
+  const restoringCoverageRef = useRef(restoringCoverage);
+  const selectedIdsRef = useRef(itemIds);
+  useEffect(() => { scanRef.current = scan; }, [scan]);
+  useEffect(() => { restoringCoverageRef.current = restoringCoverage; }, [restoringCoverage]);
+  useEffect(() => { selectedIdsRef.current = itemIds; }, [itemIds]);
 
   useEffect(() => {
     if (!liveScan) return;
@@ -406,17 +418,17 @@ export default function BlackMarketPage() {
     const schedule = (delay: number) => { if (!stopped) timer = window.setTimeout(() => void tick(), delay); };
     const tick = async () => {
       if (stopped) return;
-      if (document.visibilityState === "hidden" || !navigator.onLine || restoringCoverage || scanInProgress.current) {
+      if (document.visibilityState === "hidden" || !navigator.onLine || restoringCoverageRef.current || scanInProgress.current) {
         report(!navigator.onLine ? "Paused · offline" : document.visibilityState === "hidden" ? "Paused · tab hidden" : "Waiting for the current operation");
         schedule(1_000);
         return;
       }
-      const selected = itemIds.split(",").map((id) => id.trim()).filter(Boolean);
+      const selected = selectedIdsRef.current.split(",").map((id) => id.trim()).filter(Boolean);
       const priorityIds = [...selected, ...(completedData.current?.opportunities ?? []).map((row) => row.itemId)];
       const job = queue.next(priorityIds);
       report(job.kind === "ROLLING" ? "Checking the next catalog batch" : `Refreshing ${job.itemIds.length} priority items`);
       const started = Date.now();
-      const result = await scan(job.kind === "ROLLING" ? "ROLLING" : "LAST_RESULTS", job);
+      const result = await scanRef.current(job.kind === "ROLLING" ? "ROLLING" : "LAST_RESULTS", job);
       if (stopped) return;
       if (result === undefined) { schedule(1_000); return; }
       if (result === null) {
@@ -432,29 +444,30 @@ export default function BlackMarketPage() {
     return () => {
       stopped = true;
       window.clearTimeout(timer);
-      automaticScanController.current?.abort();
+      cancelAutomaticScan();
     };
-  }, [liveScan, scan, itemIds, quality, restoringCoverage]);
+  }, [cancelAutomaticScan, liveScan, marketKey]);
 
   useEffect(() => () => {
     abortController.current?.abort();
     if (copyResetTimer.current) window.clearTimeout(copyResetTimer.current);
   }, []);
 
-  const deferredOpportunities = useDeferredValue(data?.opportunities ?? []);
-  const matchingCoverageCount = useMemo(() => deferredOpportunities.filter((item) =>
+  const pricedOpportunities = useMemo(() => (data?.opportunities ?? []).map((row) =>
+    repriceMarketOpportunity(row, isPremium, saleMethod)), [data, isPremium, saleMethod]);
+  const matchingCoverageCount = useMemo(() => pricedOpportunities.filter((item) =>
     (originCity === "ALL" || item.sourceCity === originCity) &&
     (quality === "0" ? item.quality >= 1 && item.quality <= 4 : item.quality === Number(quality)) &&
     (category === "ALL" || item.category === category),
-  ).length, [category, deferredOpportunities, originCity, quality]);
+  ).length, [category, pricedOpportunities, originCity, quality]);
   const opportunities = useMemo(() => {
     const minimumProfitSilver = parseNonnegativeBigInt(minimumProfit);
     const minimumRoiBasisPoints = Math.max(0, Math.round(parseNonnegativeNumber(minimumRoiPercent) * 100));
     const maximumSourceAge = parsePositiveNumber(maxSourceDataAgeMinutes, 60);
     const maximumDestinationAge = parsePositiveNumber(maxDestinationDataAgeMinutes, 1_440);
     const matchingOrigin = originCity === "ALL"
-      ? deferredOpportunities
-      : deferredOpportunities.filter((item) => item.sourceCity === originCity);
+      ? pricedOpportunities
+      : pricedOpportunities.filter((item) => item.sourceCity === originCity);
     const matchingQuality = quality === "0"
       ? matchingOrigin.filter((item) => item.quality >= 1 && item.quality <= 4)
       : matchingOrigin.filter((item) => item.quality === Number(quality));
@@ -464,12 +477,7 @@ export default function BlackMarketPage() {
     const matchingThresholds = showAllPriceMatches
       ? matchingCategory
       : matchingCategory.filter((item) =>
-          BigInt(item.netProfit) >= minimumProfitSilver &&
-          (item.roiBasisPoints ?? -Infinity) >= minimumRoiBasisPoints &&
-          item.sourcePriceAgeMinutes !== null &&
-          item.sourcePriceAgeMinutes <= maximumSourceAge &&
-          item.destinationPriceAgeMinutes !== null &&
-          item.destinationPriceAgeMinutes <= maximumDestinationAge,
+          meetsScannerThresholds(item, minimumProfitSilver, minimumRoiBasisPoints, maximumSourceAge, maximumDestinationAge),
         );
     return rankProgressiveOpportunities(
       matchingThresholds,
@@ -478,7 +486,7 @@ export default function BlackMarketPage() {
       maximumDestinationAge,
       sortDirection,
     );
-  }, [category, deferredOpportunities, maxDestinationDataAgeMinutes, maxSourceDataAgeMinutes, minimumProfit, minimumRoiPercent, originCity, quality, showAllPriceMatches, sortBy, sortDirection]);
+  }, [category, pricedOpportunities, maxDestinationDataAgeMinutes, maxSourceDataAgeMinutes, minimumProfit, minimumRoiPercent, originCity, quality, showAllPriceMatches, sortBy, sortDirection]);
   const resultSummary = useMemo(() => summarizeOpportunities(opportunities), [opportunities]);
   const feeRates = getMarketFeeRates({ isPremium, saleMethod });
   const totalPages = Math.max(1, Math.ceil(opportunities.length / RESULTS_PER_PAGE));
@@ -499,7 +507,7 @@ export default function BlackMarketPage() {
   const changeLiveScan = (enabled: boolean) => {
     setLiveScan(enabled);
     if (!enabled) {
-      automaticScanController.current?.abort();
+      cancelAutomaticScan();
       setLiveCoverageStatus(null);
     }
   };
@@ -508,7 +516,6 @@ export default function BlackMarketPage() {
     document.getElementById("black-market-results")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, []);
   const changeSort = useCallback((nextSort: SortKey) => {
-    setPage(1);
     if (nextSort === sortBy) {
       setSortDirection((current) => current === "asc" ? "desc" : "asc");
       return;
@@ -519,7 +526,6 @@ export default function BlackMarketPage() {
   const changeThreshold = useCallback((update: (value: string) => void, value: string) => {
     update(value);
     setShowAllPriceMatches(false);
-    setPage(1);
   }, []);
   const copyItemId = useCallback(async (itemId: string) => {
     try {
@@ -570,14 +576,14 @@ export default function BlackMarketPage() {
 
       <section className="panel grid gap-4 rounded-lg p-5">
         <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-          <label className="field-label">Server<select className="field-input" value={server} onChange={(event) => setServer(event.target.value as AlbionServer)}><option value="EUROPE">Europe</option><option value="AMERICAS">Americas</option><option value="ASIA">Asia</option></select></label>
-          <label className="field-label">Origin market<select className="field-input" value={originCity} onChange={(event) => { const nextOrigin = event.target.value as OriginCity; setOriginCity(nextOrigin); if (nextOrigin !== "ALL" && nextOrigin === destinationCity) setDestinationCity("BLACK_MARKET"); }}><option value="ALL">All royal cities</option>{royalCityOptions.map((city) => <option key={city.value} value={city.value}>{city.label}</option>)}</select></label>
-          <label className="field-label">Destination market<select className="field-input" value={destinationCity} onChange={(event) => { const nextDestination = event.target.value as DestinationCity; setDestinationCity(nextDestination); if (nextDestination === "BLACK_MARKET") setSaleMethod("FAST_SELL"); }}><option value="BLACK_MARKET">Black Market</option>{royalCityOptions.map((city) => <option key={city.value} value={city.value} disabled={originCity === city.value}>{city.label}</option>)}</select></label>
-          <label className="field-label">Filter results by category<select className="field-input" value={category} onChange={(event) => { setCategory(event.target.value); setPage(1); }}><option value="ALL">All categories</option>{categories.map((value) => <option key={value}>{value}</option>)}</select></label>
-          <label className="field-label">Item quality<select className="field-input" value={quality} onChange={(event) => { setQuality(event.target.value as ItemQuality); setPage(1); }}><option value="0">Any quality (no Masterpiece)</option><option value="1">Normal</option><option value="2">Good</option><option value="3">Outstanding</option><option value="4">Excellent</option><option value="5">Masterpiece only</option></select></label>
+          <label className="field-label">Server<select className="field-input" value={server} onChange={(event) => switchMarket(event.target.value as AlbionServer, destinationCity, saleMethod)}><option value="EUROPE">Europe</option><option value="AMERICAS">Americas</option><option value="ASIA">Asia</option></select></label>
+          <label className="field-label">Origin market<select className="field-input" value={originCity} onChange={(event) => { const nextOrigin = event.target.value as OriginCity; setOriginCity(nextOrigin); if (nextOrigin !== "ALL" && nextOrigin === destinationCity) switchMarket(server, "BLACK_MARKET", "FAST_SELL"); }}><option value="ALL">All royal cities</option>{royalCityOptions.map((city) => <option key={city.value} value={city.value}>{city.label}</option>)}</select></label>
+          <label className="field-label">Destination market<select className="field-input" value={destinationCity} onChange={(event) => { const nextDestination = event.target.value as DestinationCity; switchMarket(server, nextDestination, nextDestination === "BLACK_MARKET" ? "FAST_SELL" : saleMethod); }}><option value="BLACK_MARKET">Black Market</option>{royalCityOptions.map((city) => <option key={city.value} value={city.value} disabled={originCity === city.value}>{city.label}</option>)}</select></label>
+          <label className="field-label">Filter results by category<select className="field-input" value={category} onChange={(event) => { setCategory(event.target.value); }}><option value="ALL">All categories</option>{categories.map((value) => <option key={value}>{value}</option>)}</select></label>
+          <label className="field-label">Item quality<select className="field-input" value={quality} onChange={(event) => { setQuality(event.target.value as ItemQuality); }}><option value="0">Any quality (no Masterpiece)</option><option value="1">Normal</option><option value="2">Good</option><option value="3">Outstanding</option><option value="4">Excellent</option><option value="5">Masterpiece only</option></select></label>
           {restoringCoverage
             ? <button className="secondary-button self-end" disabled><Activity className="animate-spin" size={15} />Loading saved coverage</button>
-            : loading
+            : loading || backgroundLoading
             ? <button className="secondary-button self-end" onClick={cancelScan}><Square size={15} />Cancel coverage</button>
             : <button className="primary-button self-end" onClick={() => void scan(hasSavedCoverage ? "LAST_RESULTS" : "FULL")}><Search size={16} />{selectedItemIds.length ? `Fast scan ${selectedItemIds.length} selected` : hasSavedCoverage ? "Fast scan last coverage" : "Create first coverage"}</button>}
         </div>
@@ -596,19 +602,19 @@ export default function BlackMarketPage() {
           <label className="field-label">Sort opportunities by<select className="field-input" value={sortBy} onChange={(event) => changeSort(event.target.value as SortKey)}><option value="combined">Combined score</option><option value="item">Item name</option><option value="route">Route</option><option value="fees">Market fees</option><option value="profit">Silver profit</option><option value="roi">Profit percentage</option><option value="profitPerKg">Profit per kilogram</option><option value="marketValue">Market value</option><option value="sourceFreshness">Newest origin data</option><option value="destinationFreshness">Newest target data</option></select></label>
           <label className="field-label">Maximum origin age (minutes)<input className="field-input" type="number" inputMode="numeric" min="1" step="1" value={maxSourceDataAgeMinutes} onFocus={(event) => event.currentTarget.select()} onChange={(event) => changeThreshold(setMaxSourceDataAgeMinutes, event.target.value)} /></label>
           <label className="field-label">Maximum target age (minutes)<input className="field-input" type="number" inputMode="numeric" min="1" step="1" value={maxDestinationDataAgeMinutes} onFocus={(event) => event.currentTarget.select()} onChange={(event) => changeThreshold(setMaxDestinationDataAgeMinutes, event.target.value)} /></label>
-          <label className="field-label">Minimum silver profit<input className="field-input" type="number" inputMode="numeric" min="0" step="1" value={minimumProfit} onFocus={(event) => event.currentTarget.select()} onChange={(event) => changeThreshold(setMinimumProfit, event.target.value)} /></label>
+          <label className="field-label">Minimum silver profit per unit<input className="field-input" type="number" inputMode="numeric" min="0" step="1" value={minimumProfit} onFocus={(event) => event.currentTarget.select()} onChange={(event) => changeThreshold(setMinimumProfit, event.target.value)} /></label>
           <label className="field-label">Minimum profit percentage<input className="field-input" type="number" inputMode="decimal" min="0" step="0.01" value={minimumRoiPercent} onFocus={(event) => event.currentTarget.select()} onChange={(event) => changeThreshold(setMinimumRoiPercent, event.target.value)} /></label>
         </div>
         <div className="grid gap-4 md:grid-cols-[1fr_1fr_2fr]">
           <label className="field-label">Premium status<select className="field-input" value={isPremium ? "PREMIUM" : "STANDARD"} onChange={(event) => setIsPremium(event.target.value === "PREMIUM")}><option value="PREMIUM">Premium</option><option value="STANDARD">No Premium</option></select></label>
-          <label className="field-label">Sale method<select className="field-input" value={saleMethod} onChange={(event) => setSaleMethod(event.target.value as MarketSaleMethod)}><option value="FAST_SELL">Fast sell to buy order</option><option value="SELL_ORDER" disabled={destinationCity === "BLACK_MARKET"}>Create sell order</option></select></label>
+          <label className="field-label">Sale method<select className="field-input" value={saleMethod} onChange={(event) => switchMarket(server, destinationCity, event.target.value as MarketSaleMethod)}><option value="FAST_SELL">Fast sell to buy order</option><option value="SELL_ORDER" disabled={destinationCity === "BLACK_MARKET"}>Create sell order</option></select></label>
           <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
             <strong>{basisPoints(feeRates.totalFeeBasisPoints)} total market fees</strong>
             <span className="mt-1 block text-xs leading-5">{basisPoints(feeRates.salesTaxBasisPoints)} sales tax{feeRates.setupFeeBasisPoints > 0 ? ` + ${basisPoints(feeRates.setupFeeBasisPoints)} sell-order setup fee` : " · no setup fee"}. {saleMethod === "FAST_SELL" ? "Uses the destination's highest buy order." : "Uses the destination's lowest sell order; the sale is not guaranteed."}</span>
           </div>
         </div>
         <div className="grid gap-3 md:grid-cols-2">
-          <label className="flex min-h-10 items-center gap-3 rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-700"><input type="checkbox" checked={showAllPriceMatches} onChange={(event) => { setShowAllPriceMatches(event.target.checked); setPage(1); }} /><span>Show every origin/target price match<span className="block text-xs font-normal text-slate-500">Ignores profit, ROI, and freshness limits. Editing any limit turns this off.</span></span></label>
+          <label className="flex min-h-10 items-center gap-3 rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-700"><input type="checkbox" checked={showAllPriceMatches} onChange={(event) => { setShowAllPriceMatches(event.target.checked); }} /><span>Show every origin/target price match<span className="block text-xs font-normal text-slate-500">Ignores profit, ROI, and freshness limits. Editing any limit turns this off.</span></span></label>
           <div className="rounded-md border border-slate-200 px-3 py-2">
             <label className="flex min-h-6 items-center gap-3 text-sm font-semibold text-slate-700"><input type="checkbox" checked={liveScan} onChange={(event) => changeLiveScan(event.target.checked)} />Rolling coverage: priority matches + catalog batches</label>
             <p className="mt-1 text-xs text-slate-500">Small batches alternate with saved matches. New batches pause in hidden tabs or offline; retries slow down after errors. Keep this page open.</p>
@@ -662,7 +668,7 @@ export default function BlackMarketPage() {
           />)}
           {opportunities.length === 0 ? <div className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm text-slate-500">
             {restoringCoverage ? "Loading saved Black Market opportunities…" : matchingCoverageCount > 0 ? `${matchingCoverageCount.toLocaleString()} saved matches are hidden by the current limits.` : data ? "No usable saved prices match this city, quality, and category." : "Run full coverage to collect market opportunities."}
-            {!restoringCoverage && matchingCoverageCount > 0 ? <button type="button" className="secondary-button mt-4 w-full" onClick={() => { setShowAllPriceMatches(true); setPage(1); }}>Show all saved matches</button> : null}
+            {!restoringCoverage && matchingCoverageCount > 0 ? <button type="button" className="secondary-button mt-4 w-full" onClick={() => { setShowAllPriceMatches(true); }}>Show all saved matches</button> : null}
           </div> : null}
         </div>
         <div className="hidden overflow-x-auto md:block">
@@ -697,7 +703,7 @@ export default function BlackMarketPage() {
                 {restoringCoverage
                   ? <span>Loading saved Black Market opportunities…</span>
                   : matchingCoverageCount > 0
-                  ? <div className="grid justify-items-center gap-3"><span>{matchingCoverageCount.toLocaleString()} saved result(s) for this city, quality, and category are hidden by profit, percentage, or freshness filters.</span><button type="button" className="secondary-button" onClick={() => { setShowAllPriceMatches(true); setPage(1); }}>Show all saved matches</button></div>
+                  ? <div className="grid justify-items-center gap-3"><span>{matchingCoverageCount.toLocaleString()} saved result(s) for this city, quality, and category are hidden by profit, percentage, or freshness filters.</span><button type="button" className="secondary-button" onClick={() => { setShowAllPriceMatches(true); }}>Show all saved matches</button></div>
                   : data
                     ? <span>No usable saved source price exists for {originCity === "ALL" ? "the selected cities" : cityName(originCity)} with this quality and category. Open that city market with the Albion Data client running, then complete a new full coverage.</span>
                     : <span>Run full coverage to collect market opportunities.</span>}
@@ -870,73 +876,6 @@ function mergeOpportunities(current: Opportunity[], incoming: Opportunity[]) {
   return Array.from(byRoute.values());
 }
 
-function rankProgressiveOpportunities(
-  items: Opportunity[],
-  sortBy: SortKey,
-  maxSourceDataAgeMinutes: number,
-  maxDestinationDataAgeMinutes: number,
-  direction: SortDirection,
-) {
-  let ranked = items.map((item) => ({ ...item }));
-  if (sortBy === "combined") {
-    const maxProfit = ranked.reduce((maximum, item) => bigintMax(maximum, BigInt(item.netProfit)), 0n);
-    const maxMarketValue = ranked.reduce((maximum, item) => bigintMax(maximum, BigInt(item.marketValue)), 0n);
-    const maxRoi = Math.max(0, ...ranked.map((item) => item.roiBasisPoints ?? 0));
-    ranked = ranked.map((item) => {
-      const sourceFreshness = Math.max(0, 1 - (item.sourcePriceAgeMinutes ?? maxSourceDataAgeMinutes * 2) / maxSourceDataAgeMinutes);
-      const destinationFreshness = Math.max(0, 1 - (item.destinationPriceAgeMinutes ?? maxDestinationDataAgeMinutes * 2) / maxDestinationDataAgeMinutes);
-      const freshnessScore = sourceFreshness * 0.8 + destinationFreshness * 0.2;
-      const profitScore = maxProfit > 0n ? Number((BigInt(item.netProfit) * 10_000n) / maxProfit) / 10_000 : 0;
-      const valueScore = maxMarketValue > 0n ? Number((BigInt(item.marketValue) * 10_000n) / maxMarketValue) / 10_000 : 0;
-      const roiScore = maxRoi > 0 ? (item.roiBasisPoints ?? 0) / maxRoi : 0;
-      return { ...item, score: Math.round((profitScore * 0.35 + roiScore * 0.25 + valueScore * 0.15 + freshnessScore * 0.25) * 10_000) / 100 };
-    });
-  }
-  const multiplier = direction === "asc" ? 1 : -1;
-  ranked.sort((left, right) => compareOpportunityField(left, right, sortBy) * multiplier);
-  return ranked;
-}
-
-function compareOpportunityField(left: Opportunity, right: Opportunity, sortBy: SortKey) {
-  if (sortBy === "item") return left.itemName.localeCompare(right.itemName) || left.itemId.localeCompare(right.itemId);
-  if (sortBy === "route") return `${left.sourceCity}:${left.destinationCity}`.localeCompare(`${right.sourceCity}:${right.destinationCity}`);
-  if (sortBy === "purchasePrice") return compareNullableBigIntStrings(left.purchasePrice, right.purchasePrice);
-  if (sortBy === "expectedSalePrice") return compareNullableBigIntStrings(left.expectedSalePrice, right.expectedSalePrice);
-  if (sortBy === "quantity") return left.recommendedQuantity - right.recommendedQuantity;
-  if (sortBy === "investment") return compareBigIntStrings(left.investment, right.investment);
-  if (sortBy === "fees") return compareBigIntStrings((BigInt(left.taxes) + BigInt(left.setupFees)).toString(), (BigInt(right.taxes) + BigInt(right.setupFees)).toString());
-  if (sortBy === "profit") return compareBigIntStrings(left.netProfit, right.netProfit);
-  if (sortBy === "marketValue") return compareBigIntStrings(left.marketValue, right.marketValue);
-  if (sortBy === "roi") return (left.roiBasisPoints ?? -Infinity) - (right.roiBasisPoints ?? -Infinity);
-  if (sortBy === "profitPerKg") return (left.profitPerKgSilver ?? -Infinity) - (right.profitPerKgSilver ?? -Infinity);
-  if (sortBy === "sourceFreshness") return freshnessSortValue(left.sourcePriceAgeMinutes) - freshnessSortValue(right.sourcePriceAgeMinutes);
-  if (sortBy === "destinationFreshness") return freshnessSortValue(left.destinationPriceAgeMinutes) - freshnessSortValue(right.destinationPriceAgeMinutes);
-  if (sortBy === "confidence") return confidenceRank(left.confidence) - confidenceRank(right.confidence);
-  return left.score - right.score;
-}
-
-function defaultSortDirection(sortBy: SortKey): SortDirection {
-  return sortBy === "item" || sortBy === "route" || sortBy === "sourceFreshness" || sortBy === "destinationFreshness" ? "asc" : "desc";
-}
-
-function confidenceRank(confidence: Opportunity["confidence"]) {
-  return confidence === "HIGH" ? 3 : confidence === "MEDIUM" ? 2 : 1;
-}
-
-function compareNullableBigIntStrings(left: string | null, right: string | null) {
-  if (left === null) return right === null ? 0 : 1;
-  if (right === null) return -1;
-  return compareBigIntStrings(left, right);
-}
-
-function compareBigIntStrings(left: string, right: string) {
-  const leftValue = BigInt(left);
-  const rightValue = BigInt(right);
-  return leftValue === rightValue ? 0 : leftValue > rightValue ? 1 : -1;
-}
-
-function bigintMax(left: bigint, right: bigint) { return left > right ? left : right; }
-function freshnessSortValue(value: number | null) { return value ?? Infinity; }
 function parseNonnegativeNumber(value: string) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;

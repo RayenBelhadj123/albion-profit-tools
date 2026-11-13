@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 
 const mocks = vi.hoisted(() => ({
   items: vi.fn(),
@@ -8,14 +9,17 @@ const mocks = vi.hoisted(() => ({
   history: vi.fn(),
   cachePrices: vi.fn(),
   loadPrices: vi.fn(),
+  user: vi.fn(),
+  privatePrices: vi.fn(),
 }));
 
 vi.mock("@/lib/db/prisma", () => ({ prisma: {
   item: { findMany: mocks.items },
   route: { findMany: mocks.routes },
+  privateMarketObservation: { findMany: mocks.privatePrices },
   blackMarketScanSnapshot: { upsert: mocks.snapshot, findUnique: mocks.restore },
 } }));
-vi.mock("@/lib/auth/session", () => ({ getCurrentUser: async () => null }));
+vi.mock("@/lib/auth/session", () => ({ getCurrentUser: mocks.user }));
 vi.mock("@/lib/albion/historical-prices", () => ({ fetchHistoricalSellEstimates: mocks.history }));
 vi.mock("@/lib/albion/historical-price-cache", () => ({ cacheHistoricalPriceEstimates: vi.fn() }));
 vi.mock("@/lib/albion/market-price-cache", async (importOriginal) => ({
@@ -43,6 +47,8 @@ const request = (query: string, init?: RequestInit) => new Request(`http://local
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
+  mocks.user.mockResolvedValue(null);
+  mocks.privatePrices.mockResolvedValue([]);
   delete state.blackMarketCatalog;
   state.blackMarketCompletedScans?.clear();
   mocks.items.mockResolvedValue(catalog(["T4_BAG"]));
@@ -57,6 +63,61 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("rolling scan API", () => {
+  it("isolates memory, persisted snapshots and slices between users and anonymous requests", async () => {
+    mocks.items.mockResolvedValue([]);
+    const records = new Map<string, unknown>();
+    mocks.snapshot.mockImplementation(async ({ where, create }) => { records.set(where.id, create); return create; });
+    mocks.restore.mockImplementation(async ({ where }) => records.get(where.id) ?? null);
+    const { GET } = await import("./route");
+    mocks.user.mockResolvedValue({ id: "A" });
+    await GET(request("quality=6"));
+    expect(mocks.user).toHaveBeenCalledTimes(1);
+    for (const user of [{ id: "B" }, null]) {
+      mocks.user.mockResolvedValue(user);
+      expect((await GET(request("quality=6&latest=true"))).status).toBe(404);
+      expect((await GET(request("quality=6&latest=true&restoreQuality=1"))).status).toBe(404);
+    }
+    state.blackMarketCompletedScans?.clear();
+    mocks.user.mockResolvedValue({ id: "A" });
+    expect((await GET(request("quality=6&latest=true"))).status).toBe(200);
+    expect((await GET(request("quality=6&latest=true&restoreQuality=1"))).status).toBe(200);
+  });
+  it("never restores private overrides across owners, including after memory loss or from a legacy key", async () => {
+    const records = new Map<string, unknown>();
+    mocks.snapshot.mockImplementation(async ({ where, create }) => { records.set(where.id, create); return create; });
+    mocks.restore.mockImplementation(async ({ where }) => records.get(where.id) ?? null);
+    const now = new Date();
+    mocks.privatePrices.mockImplementation(async ({ where }) => where.userId === "A" ? [
+      { itemId: "T4_BAG", city: "BRIDGEWATCH", quality: 1, orderType: "SELL", price: 100n,
+        availableQuantity: null, observedAt: now, expiresAt: null, source: "MANUAL", preferredOverride: true },
+      { itemId: "T4_BAG", city: "BLACK_MARKET", quality: 1, orderType: "BUY", price: 200n,
+        availableQuantity: null, observedAt: now, expiresAt: null, source: "MANUAL", preferredOverride: true },
+    ] : []);
+    const { GET } = await import("./route");
+    const query = "quality=1&showAllPriceMatches=true";
+    mocks.user.mockResolvedValue({ id: "A" });
+    const scan = await (await GET(request(query))).json();
+    expect(scan.opportunities[0]).toMatchObject({ purchasePriceSource: "PRIVATE_MANUAL", salePriceSource: "PRIVATE_MANUAL", availableQuantity: null });
+    expect(mocks.user).toHaveBeenCalledTimes(1);
+    expect(mocks.privatePrices.mock.calls[0][0].where.userId).toBe("A");
+    expect(mocks.cachePrices.mock.calls.flatMap(([prices]) => prices)).toEqual([]);
+    const scopedKey = [...state.blackMarketCompletedScans!.keys()][0];
+    for (const useMemory of [true, false]) {
+      if (!useMemory) state.blackMarketCompletedScans?.clear();
+      for (const user of [{ id: "B" }, null]) {
+        mocks.user.mockResolvedValue(user);
+        expect((await GET(request(`${query}&latest=true`))).status).toBe(404);
+      }
+    }
+    mocks.user.mockResolvedValue({ id: "A" });
+    expect((await (await GET(request(`${query}&latest=true`))).json()).opportunities[0].purchasePriceSource).toBe("PRIVATE_MANUAL");
+    const legacyKey = JSON.parse(scopedKey);
+    delete legacyKey.version;
+    delete legacyKey.userId;
+    records.clear(); state.blackMarketCompletedScans?.clear();
+    records.set(createHash("sha256").update(JSON.stringify(legacyKey)).digest("hex"), { result: scan, cachedAt: now });
+    expect((await GET(request(`${query}&latest=true`))).status).toBe(404);
+  });
   it("includes coverage only on successful streaming completion", async () => {
     const { GET } = await import("./route");
     const response = await GET(request("rollingCursor=&stream=true&quality=6"));
