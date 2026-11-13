@@ -3,7 +3,7 @@ name: Verify scanner
 on:
   pull_request:
   push:
-    branches: [main, 'fix/**']
+    branches: [main, 'fix/**', 'feat/**']
 
 permissions:
   contents: read
@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
+      TMPDIR: ${{ runner.temp }}
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/albion_ci
     steps:
       - uses: actions/checkout@v7.0.1
@@ -25,6 +26,7 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      - run: npm ci --prefix portable/runtime --omit=optional --omit=peer --ignore-scripts
       - run: npm run prisma:generate
       - run: npm test
       - run: npm run typecheck

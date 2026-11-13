@@ -4,6 +4,7 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   output: "standalone",
   async redirects() {
+    if (process.env.ALBION_PORTABLE_BUILD === "1") return [];
     return [
       "/about",
       "/account",
