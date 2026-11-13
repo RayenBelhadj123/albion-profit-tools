@@ -6,6 +6,14 @@ import { usePathname } from "next/navigation";
 const navItems = [
   { href: "/black-market", label: "Transport Scanner" },
   { href: "/market", label: "Market tools" },
+  ...(process.env.NEXT_PUBLIC_PORTABLE_MODE === "1" ? [
+    { href: "/crafting", label: "Crafting" },
+    { href: "/refining", label: "Refining" },
+    { href: "/cooking", label: "Cooking" },
+    { href: "/coverage", label: "Coverage" },
+    { href: "/private-prices", label: "Private prices" },
+    { href: "/account", label: "Account" },
+  ] : []),
 ] as const;
 
 export function SiteNav() {
