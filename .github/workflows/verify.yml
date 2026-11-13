@@ -17,7 +17,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      TMPDIR: ${{ runner.temp }}
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/albion_ci
     steps:
       - uses: actions/checkout@v7.0.1
@@ -29,6 +28,8 @@ jobs:
       - run: npm ci --prefix portable/runtime --omit=optional --omit=peer --ignore-scripts
       - run: npm run prisma:generate
       - run: npm test
+        env:
+          TMPDIR: ${{ runner.temp }}
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
