@@ -1,11 +1,15 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-if not exist ".next\standalone\server.js" (
-  echo Local production build not found. Run: npm run build
+
+where powershell.exe >nul 2>&1
+if errorlevel 1 (
+  echo PowerShell is required to start Albion Transport.
   pause
   exit /b 1
 )
-set HOSTNAME=127.0.0.1
-set PORT=3000
-node ".next\standalone\server.js"
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-local.ps1"
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" pause
+exit /b %EXIT_CODE%
